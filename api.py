@@ -15,6 +15,9 @@ from urllib.parse import urlencode, unquote
 import argparse
 from pathlib import Path
 import re
+import os
+
+DISALLOW_ROBOTS = bool(eval(os.environ.get("DISALLOW_ROBOTS", "False")))
 
 """
 main routine
@@ -49,6 +52,10 @@ if __name__ == "__main__":
     # Production
     print("host:", args.host)
     print("port:", args.port)
+    if DISALLOW_ROBOTS:
+        print("robots: Disallow")
+    else:
+        print("robots: Allow")
     module_name = __name__.split(".")[0]
     uvicorn.run(module_name+":app", host=args.host, port=args.port, workers=4)
 
@@ -75,6 +82,13 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 async def mainpage():
     return FileResponse("static/index.html")
 
+# /robots.txt
+@app.get("/robots.txt")
+async def robots():
+    if DISALLOW_ROBOTS:
+        return Response(content="User-agent: *\nDisallow: /", media_type="text/plain")
+    else:
+        return Response(status_code=404)
 
 # subscription to proxy-provider
 @app.get("/provider")
@@ -82,7 +96,7 @@ async def provider(request: Request):
     headers = {'Content-Type': 'text/yaml;charset=utf-8'}
     url = request.query_params.get("url")
     async with httpx.AsyncClient() as client:
-        resp = await client.get(url, headers={'User-Agent':'clash'})
+        resp = await client.get(url, headers={'User-Agent':request.headers['User-Agent']})
         if resp.status_code < 200 or resp.status_code >= 400:
             raise HTTPException(status_code=resp.status_code, detail=resp.text)
         result = await parse.parseSubs(resp.text)
@@ -151,13 +165,13 @@ async def sub(request: Request):
         headers = {'Content-Type': 'text/yaml;charset=utf-8'}
         # if there's only one subscription, return userinfo
         if length(url) == 1:
-            resp = await client.head(url[0], headers={'User-Agent':'clash'})
+            resp = await client.head(url[0], headers={'User-Agent':request.headers['User-Agent']})
             if resp.status_code < 200 or resp.status_code >= 400:
                 raise HTTPException(status_code=resp.status_code, detail=resp.text)
             elif resp.status_code >= 300 and resp.status_code < 400:
                 while resp.status_code >= 300 and resp.status_code < 400:
                     url[0] = resp.headers['Location']
-                    resp = await client.head(url[0], headers={'User-Agent':'clash'})
+                    resp = await client.head(url[0], headers={'User-Agent':request.headers['User-Agent']})
                     if resp.status_code < 200 or resp.status_code >= 400:
                         raise HTTPException(status_code=resp.status_code, detail=resp.text)
             originalHeaders = resp.headers
@@ -170,7 +184,7 @@ async def sub(request: Request):
         if url is not None:
             for i in range(len(url)):
                 # the test of response
-                respText = (await client.get(url[i], headers={'User-Agent':'clash'})).text
+                respText = (await client.get(url[i], headers={'User-Agent':request.headers['User-Agent']})).text
                 content.append(await parse.parseSubs(respText))
                 url[i] = "{}provider?{}".format(request.base_url, urlencode({"url": url[i]}))
     if len(content) == 0:
@@ -187,11 +201,11 @@ async def sub(request: Request):
 
 # proxy
 @app.get("/proxy")
-async def proxy(url: str):
+async def proxy(request: Request, url: str):
     # file was big so use stream
     async def stream():
         async with httpx.AsyncClient() as client:
-            async with client.stream("GET", url, headers={'User-Agent':'clash'}) as resp:
+            async with client.stream("GET", url, headers={'User-Agent':request.headers['User-Agent']}) as resp:
                 yield resp.status_code
                 yield resp.headers
                 if resp.status_code < 200 or resp.status_code >= 400:
